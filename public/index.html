@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en" class="bg-gray-50 text-gray-900">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Internship Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="p-8 max-w-7xl mx-auto">
+
+    <h1 class="text-3xl font-bold mb-8 text-indigo-600">&#x1F680; Internship Tracker</h1>
+
+    <div class="bg-white p-6 rounded-lg shadow-md mb-8 flex flex-col items-center">
+        <h2 class="text-xl font-semibold mb-4 w-full text-left">Application Overview</h2>
+        <div class="relative w-72 h-72">
+            <canvas id="statusChart"></canvas>
+        </div>
+    </div>
+
+    <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+        <h2 class="text-xl font-semibold mb-4">Add New Application</h2>
+        <form id="addForm" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <input type="text" id="company" placeholder="Company Name" required class="border p-2 rounded focus:ring focus:ring-indigo-200 outline-none">
+            <input type="text" id="title" placeholder="Job Title" required class="border p-2 rounded focus:ring focus:ring-indigo-200 outline-none">
+            <input type="text" id="location" placeholder="Location (e.g., Remote, Paris)" class="border p-2 rounded focus:ring focus:ring-indigo-200 outline-none">
+            <input type="date" id="date" required class="border p-2 rounded focus:ring focus:ring-indigo-200 outline-none">
+            <input type="url" id="link" placeholder="Job URL" class="border p-2 rounded focus:ring focus:ring-indigo-200 outline-none lg:col-span-2">
+            <select id="status" class="border p-2 rounded focus:ring focus:ring-indigo-200 outline-none"></select>
+            <button type="submit" class="bg-indigo-600 text-white font-semibold p-2 rounded hover:bg-indigo-700 transition">Add Application</button>
+            <textarea id="details" placeholder="Notes (e.g., Tech stack, recruiter name)" class="border p-2 rounded focus:ring focus:ring-indigo-200 outline-none lg:col-span-4 h-20"></textarea>
+        </form>
+    </div>
+
+    <div class="bg-white rounded-lg shadow-md overflow-x-auto">
+        <div class="p-4 border-b bg-gray-50 flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+            <div class="flex items-center gap-2">
+                <label for="statusFilter" class="text-sm font-medium text-gray-700">Filter status:</label>
+                <select id="statusFilter" class="border p-2 rounded text-sm focus:ring focus:ring-indigo-200 outline-none">
+                    <option value="all">All</option>
+                </select>
+            </div>
+            <div class="flex items-center gap-2">
+                <label for="sortBy" class="text-sm font-medium text-gray-700">Sort:</label>
+                <select id="sortBy" class="border p-2 rounded text-sm focus:ring focus:ring-indigo-200 outline-none">
+                    <option value="date_desc">Date (Newest)</option>
+                    <option value="date_asc">Date (Oldest)</option>
+                    <option value="company_asc">Company (A-Z)</option>
+                    <option value="status">Status</option>
+                </select>
+            </div>
+        </div>
+        <table class="w-full text-left border-collapse">
+            <thead>
+                <tr class="bg-gray-100 border-b">
+                    <th class="p-4">Date</th>
+                    <th class="p-4">Company</th>
+                    <th class="p-4">Title / Location</th>
+                    <th class="p-4">Link</th>
+                    <th class="p-4">Status</th>
+                    <th class="p-4">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="tableBody"></tbody>
+        </table>
+    </div>
+
+    <script>
+        const API_URL = '/api/applications';
+        const STATUS_ORDER = ['applied', 'assessment', 'interview', 'offer', 'refused', 'ghosted'];
+        const STATUS_MAP = {
+            applied: { label: 'Applied', chartColor: '#3b82f6', css: 'bg-blue-100 text-blue-800' },
+            assessment: { label: 'Assessment', chartColor: '#f59e0b', css: 'bg-yellow-100 text-yellow-800' },
+            interview: { label: 'Interview', chartColor: '#a855f7', css: 'bg-purple-100 text-purple-800' },
+            offer: { label: 'Offer \u{1F389}', chartColor: '#22c55e', css: 'bg-green-100 text-green-800' },
+            refused: { label: 'Refused \u{274C}', chartColor: '#ef4444', css: 'bg-red-100 text-red-800' },
+            ghosted: { label: 'Ghosted \u{1F47B}', chartColor: '#9ca3af', css: 'bg-gray-200 text-gray-800' }
+        };
+        const EMPTY_CHART_LABEL = 'No Applications Yet';
+        let statusChartInstance = null;
+        let allApplications = [];
+        const editingDetailsIds = new Set();
+
+        const centerTextPlugin = {
+            id: 'centerText',
+            afterDraw(chart, args, pluginOptions) {
+                const { ctx, chartArea } = chart;
+                if (!chartArea) return;
+
+                const centerX = (chartArea.left + chartArea.right) / 2;
+                const centerY = (chartArea.top + chartArea.bottom) / 2;
+                const totalValue = chart.config.data.actualTotal ?? 0;
+                const label = pluginOptions?.label || 'Total';
+
+                ctx.save();
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = '#6b7280';
+                ctx.font = '500 14px system-ui, -apple-system, Segoe UI, sans-serif';
+                ctx.fillText(label, centerX, centerY - 16);
+                ctx.fillStyle = '#1f2937';
+                ctx.font = '700 36px system-ui, -apple-system, Segoe UI, sans-serif';
+                ctx.fillText(String(totalValue), centerX, centerY + 14);
+                ctx.restore();
+            }
+        };
+
+        function escapeHTML(str) {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>'"]/g, (tag) => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                "'": '&#39;',
+                '"': '&quot;'
+            }[tag]));
+        }
+
+        function safeLink(url) {
+            if (!url) return '';
+            try {
+                const parsed = new URL(url, window.location.origin);
+                if (['http:', 'https:'].includes(parsed.protocol.toLowerCase())) return parsed.href;
+                return '';
+            } catch (_) {
+                return '';
+            }
+        }
+
+        function normalizeStatusClient(rawStatus) {
+            const value = String(rawStatus || '').toLowerCase().trim();
+            return STATUS_MAP[value] ? value : 'applied';
+        }
+
+        function renderStatusOptions(selectedStatus) {
+            return STATUS_ORDER
+                .map((key) => `<option value="${key}" ${selectedStatus === key ? 'selected' : ''}>${STATUS_MAP[key].label}</option>`)
+                .join('');
+        }
+
+        function initStatusSelect() {
+            const select = document.getElementById('status');
+            select.innerHTML = renderStatusOptions('applied');
+        }
+
+        function initStatusFilter() {
+            const filter = document.getElementById('statusFilter');
+            filter.innerHTML = `<option value="all">All</option>${STATUS_ORDER
+                .map((key) => `<option value="${key}">${STATUS_MAP[key].label}</option>`)
+                .join('')}`;
+        }
+
+        async function parseErrorResponse(res) {
+            const errorText = await res.text();
+            let errorMessage = `HTTP ${res.status}`;
+            try {
+                const errJson = JSON.parse(errorText);
+                errorMessage = errJson.error || errorMessage;
+            } catch (_) {
+                console.error('Server returned non-JSON error:', errorText);
+            }
+            return new Error(errorMessage);
+        }
+
+        function getVisibleApplications() {
+            const filterValue = document.getElementById('statusFilter').value;
+            const sortValue = document.getElementById('sortBy').value;
+
+            let data = allApplications.filter((app) => {
+                const status = normalizeStatusClient(app.status);
+                return filterValue === 'all' || status === filterValue;
+            });
+
+            data = [...data].sort((a, b) => {
+                if (sortValue === 'date_asc') {
+                    return String(a.date_applied || '').localeCompare(String(b.date_applied || ''));
+                }
+                if (sortValue === 'company_asc') {
+                    return String(a.company || '').localeCompare(String(b.company || ''));
+                }
+                if (sortValue === 'status') {
+                    return STATUS_ORDER.indexOf(normalizeStatusClient(a.status)) - STATUS_ORDER.indexOf(normalizeStatusClient(b.status));
+                }
+                return String(b.date_applied || '').localeCompare(String(a.date_applied || ''));
+            });
+
+            return data;
+        }
+
+        function renderTable(data) {
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = '';
+
+            if (data.length === 0) {
+                tbody.innerHTML = `
+                    <tr class="border-b">
+                        <td class="p-6 text-center text-gray-500 italic" colspan="6">No applications yet! Time to start applying.</td>
+                    </tr>
+                `;
+                return;
+            }
+
+            data.forEach((app) => {
+                const tr = document.createElement('tr');
+                tr.className = 'border-b hover:bg-gray-50';
+                const normalizedLink = safeLink(app.link);
+                const statusKey = normalizeStatusClient(app.status);
+                const statusData = STATUS_MAP[statusKey];
+                const isEditingDetails = editingDetailsIds.has(app.id);
+                const detailsValue = app.details || '';
+
+                tr.innerHTML = `
+                    <td class="p-4 whitespace-nowrap text-sm text-gray-600">${escapeHTML(app.date_applied || '-')}</td>
+                    <td class="p-4 font-semibold">${escapeHTML(app.company)}</td>
+                    <td class="p-4">
+                        <div class="text-sm text-gray-900">${escapeHTML(app.title)}</div>
+                        <div class="text-xs text-gray-500">${escapeHTML(app.location)}</div>
+                        <div id="details-${app.id}" class="mt-1">
+                            ${isEditingDetails
+                                ? `<textarea id="details-input-${app.id}" class="w-full border p-2 rounded text-xs focus:ring focus:ring-indigo-200 outline-none h-20">${escapeHTML(detailsValue)}</textarea>`
+                                : `${detailsValue ? `<div class="text-xs text-gray-400 italic">&#x1F4DD; ${escapeHTML(detailsValue)}</div>` : '<div class="text-xs text-gray-300 italic">No details yet</div>'}`}
+                        </div>
+                    </td>
+                    <td class="p-4">
+                        ${normalizedLink ? `<a href="${escapeHTML(normalizedLink)}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline text-sm">View Job</a>` : '-'}
+                    </td>
+                    <td class="p-4">
+                        <select data-prev-value="${statusKey}" onchange="updateStatus(${app.id}, this.value, this)" class="text-sm font-medium px-2 py-1 rounded-full outline-none ${statusData.css} appearance-none cursor-pointer">
+                            ${renderStatusOptions(statusKey)}
+                        </select>
+                    </td>
+                    <td class="p-4">
+                        ${isEditingDetails
+                            ? `
+                                <button onclick="saveDetails(${app.id}, this)" class="text-green-600 hover:text-green-800 text-sm font-semibold transition mr-3">Save</button>
+                                <button onclick="cancelEditDetails(${app.id})" class="text-gray-500 hover:text-gray-700 text-sm font-semibold transition mr-3">Cancel</button>
+                                <button onclick="deleteApp(${app.id})" class="text-red-500 hover:text-red-700 text-sm font-semibold transition">Delete</button>
+                              `
+                            : `
+                                <button onclick="startEditDetails(${app.id})" class="text-indigo-600 hover:text-indigo-800 text-sm font-semibold transition mr-3">Edit</button>
+                                <button onclick="deleteApp(${app.id})" class="text-red-500 hover:text-red-700 text-sm font-semibold transition">Delete</button>
+                              `}
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function updateDashboard(data) {
+            const counts = Object.fromEntries(STATUS_ORDER.map((key) => [key, 0]));
+
+            if (data.length > 0) {
+                data.forEach((app) => {
+                    const normalized = normalizeStatusClient(app.status);
+                    counts[normalized] += 1;
+                });
+            }
+
+            const labels = data.length === 0
+                ? [EMPTY_CHART_LABEL]
+                : STATUS_ORDER.map((key) => STATUS_MAP[key].label);
+            const chartValues = data.length === 0
+                ? [1]
+                : STATUS_ORDER.map((key) => counts[key]);
+            const chartColors = data.length === 0
+                ? ['#d1d5db']
+                : STATUS_ORDER.map((key) => STATUS_MAP[key].chartColor);
+
+            const ctx = document.getElementById('statusChart').getContext('2d');
+            if (statusChartInstance) {
+                statusChartInstance.destroy();
+            }
+
+            statusChartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    actualTotal: data.length,
+                    labels,
+                    datasets: [{
+                        data: chartValues,
+                        backgroundColor: chartColors,
+                        borderWidth: 0,
+                        cutout: '75%',
+                        hoverOffset: 4
+                    }]
+                },
+                plugins: [centerTextPlugin],
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        centerText: { label: 'Total' },
+                        legend: { position: 'right', labels: { usePointStyle: true, padding: 20 } },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.label || '';
+                                    if (label) label += ': ';
+                                    label += context.parsed;
+                                    const percentage = data.length ? Math.round((context.parsed / data.length) * 100) : 0;
+                                    return `${label} (${percentage}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        async function fetchApplications() {
+            try {
+                const res = await fetch(API_URL);
+                if (!res.ok) throw await parseErrorResponse(res);
+                const rawText = await res.text();
+                let data;
+                try {
+                    data = JSON.parse(rawText);
+                } catch (_) {
+                    throw new Error('Server returned invalid JSON for applications list');
+                }
+
+                allApplications = Array.isArray(data) ? data : [];
+                updateDashboard(allApplications);
+                renderTable(getVisibleApplications());
+            } catch (error) {
+                console.error('Error fetching applications:', error);
+                alert('Failed to load applications. Please check if the server is running.');
+            }
+        }
+
+        document.getElementById('addForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = e.target.querySelector('button[type="submit"]');
+            const originalText = btn.innerText;
+            btn.innerText = 'Adding...';
+            btn.disabled = true;
+
+            try {
+                const payload = {
+                    company: document.getElementById('company').value,
+                    title: document.getElementById('title').value,
+                    location: document.getElementById('location').value,
+                    link: document.getElementById('link').value,
+                    date_applied: document.getElementById('date').value,
+                    status: normalizeStatusClient(document.getElementById('status').value),
+                    details: document.getElementById('details').value,
+                };
+
+                const res = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) {
+                    throw await parseErrorResponse(res);
+                }
+
+                e.target.reset();
+                initStatusSelect();
+                document.getElementById('date').valueAsDate = new Date();
+                await fetchApplications();
+            } catch (error) {
+                console.error('Add application error:', error);
+                alert(`Failed to add: ${error.message}`);
+            } finally {
+                btn.innerText = originalText;
+                btn.disabled = false;
+            }
+        });
+
+        async function updateStatus(id, newStatus, selectElement) {
+            const previousValue = selectElement.getAttribute('data-prev-value');
+            selectElement.disabled = true;
+            try {
+                const res = await fetch(`${API_URL}/${id}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: normalizeStatusClient(newStatus) })
+                });
+
+                if (!res.ok) {
+                    throw await parseErrorResponse(res);
+                }
+
+                selectElement.setAttribute('data-prev-value', newStatus);
+                await fetchApplications();
+            } catch (error) {
+                console.error('Update status error:', error);
+                alert(`Failed to update status: ${error.message}`);
+                if (previousValue) selectElement.value = previousValue;
+            } finally {
+                selectElement.disabled = false;
+            }
+        }
+
+        function startEditDetails(id) {
+            editingDetailsIds.add(id);
+            renderTable(getVisibleApplications());
+        }
+
+        function cancelEditDetails(id) {
+            editingDetailsIds.delete(id);
+            renderTable(getVisibleApplications());
+        }
+
+        async function updateDetails(id, newDetails) {
+            const res = await fetch(`${API_URL}/${id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ details: newDetails })
+            });
+
+            if (!res.ok) {
+                throw await parseErrorResponse(res);
+            }
+        }
+
+        async function saveDetails(id, buttonEl) {
+            const input = document.getElementById(`details-input-${id}`);
+            const nextDetails = input ? input.value : '';
+            const originalText = buttonEl.innerText;
+            buttonEl.innerText = 'Saving...';
+            buttonEl.disabled = true;
+
+            try {
+                await updateDetails(id, nextDetails);
+                editingDetailsIds.delete(id);
+                await fetchApplications();
+            } catch (error) {
+                console.error('Update details error:', error);
+                alert(`Failed to update details: ${error.message}`);
+            } finally {
+                buttonEl.innerText = originalText;
+                buttonEl.disabled = false;
+            }
+        }
+
+        async function deleteApp(id) {
+            if (confirm('Are you sure you want to delete this record?')) {
+                try {
+                    const res = await fetch(`${API_URL}/${id}`, { method: 'DELETE' });
+                    if (!res.ok) {
+                        throw await parseErrorResponse(res);
+                    }
+                    editingDetailsIds.delete(id);
+                    await fetchApplications();
+                } catch (error) {
+                    console.error('Delete application error:', error);
+                    alert(`Failed to delete application: ${error.message}`);
+                }
+            }
+        }
+
+        initStatusSelect();
+        initStatusFilter();
+        document.getElementById('statusFilter').addEventListener('change', () => renderTable(getVisibleApplications()));
+        document.getElementById('sortBy').addEventListener('change', () => renderTable(getVisibleApplications()));
+        fetchApplications();
+        document.getElementById('date').valueAsDate = new Date();
+    </script>
+</body>
+</html>
