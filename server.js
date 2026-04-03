@@ -8,6 +8,10 @@ const app    = express();
 const PORT   = process.env.PORT || 3000;
 const IS_DEV = process.env.NODE_ENV !== 'production';
 
+// Trust the first proxy hop (Nginx). Required for express-rate-limit to read
+// the real client IP from X-Forwarded-For without throwing a validation error.
+app.set('trust proxy', 1);
+
 // ─── Security headers ────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -49,9 +53,11 @@ app.use('/api', apiLimiter);
 app.use(express.json({ limit: '2mb' })); // large enough for a full import
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Serve Chart.js locally from node_modules (eliminates CDN dependency)
+// Serve Chart.js locally from node_modules (eliminates CDN dependency).
+// Use path.join instead of require.resolve — chart.js v4 restricts package
+// subpath exports so require.resolve cannot access dist files directly.
 app.get('/js/chart.min.js', (req, res) => {
-  res.sendFile(require.resolve('chart.js/dist/chart.umd.min.js'));
+  res.sendFile(path.join(__dirname, 'node_modules/chart.js/dist/chart.umd.min.js'));
 });
 
 // ─── Status configuration (single source of truth) ───────────────────────────
