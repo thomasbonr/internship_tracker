@@ -1,20 +1,89 @@
-const express = require('express');
-const Database = require('better-sqlite3');
-const path = require('path');
+const express   = require('express');
+const Database  = require('better-sqlite3');
+const rateLimit = require('express-rate-limit');
+const cors      = require('cors');
+const path      = require('path');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+const app    = express();
+const PORT   = process.env.PORT || 3000;
+const IS_DEV = process.env.NODE_ENV !== 'production';
 
-// Middleware
-app.use(express.json());
+// ─── Security headers ────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
+// ─── CORS ────────────────────────────────────────────────────────────────────
+// Default: same-origin only (origin: false). Set ALLOWED_ORIGIN env var to
+// permit a specific cross-origin host (e.g. a reverse proxy on a different port).
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGIN || false,
+  optionsSuccessStatus: 200,
+}));
+
+// ─── Rate limiting ────────────────────────────────────────────────────────────
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 min
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests — please try again later.' },
+});
+
+// Tighter limit for the import endpoint (bulk write)
+const importLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many import requests — please try again later.' },
+});
+
+app.use('/api', apiLimiter);
+
+// ─── Middleware ──────────────────────────────────────────────────────────────
+app.use(express.json({ limit: '2mb' })); // large enough for a full import
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Initialize DB safely
+// Serve Chart.js locally from node_modules (eliminates CDN dependency)
+app.get('/js/chart.min.js', (req, res) => {
+  res.sendFile(require.resolve('chart.js/dist/chart.umd.min.js'));
+});
+
+// ─── Status configuration (single source of truth) ───────────────────────────
+// Changing a status here automatically propagates to the frontend via /api/statuses.
+const STATUS_CONFIG = [
+  { key: 'applied',    label: 'Applied',      chartColor: '#3b82f6', css: 'bg-blue-100 text-blue-800' },
+  { key: 'assessment', label: 'Assessment',   chartColor: '#f59e0b', css: 'bg-yellow-100 text-yellow-800' },
+  { key: 'interview',  label: 'Interview',    chartColor: '#a855f7', css: 'bg-purple-100 text-purple-800' },
+  { key: 'offer',      label: 'Offer 🎉',     chartColor: '#22c55e', css: 'bg-green-100 text-green-800' },
+  { key: 'refused',    label: 'Refused ❌',   chartColor: '#ef4444', css: 'bg-red-100 text-red-800' },
+  { key: 'ghosted',    label: 'Ghosted 👻',   chartColor: '#9ca3af', css: 'bg-gray-200 text-gray-800' },
+];
+
+const VALID_STATUSES = STATUS_CONFIG.map((s) => s.key);
+
+const LEGACY_STATUS_MAP = {
+  Applied: 'applied', Assessment: 'assessment', Interview: 'interview',
+  Offer: 'offer', Refused: 'refused', Ghosted: 'ghosted',
+  'Offer 🎉': 'offer',   'Refused ❌': 'refused',   'Ghosted 👻': 'ghosted',
+  'Offer ðŸŽ‰': 'offer', 'Refused âŒ': 'refused', 'Ghosted ðŸ'»': 'ghosted',
+};
+
+const FIELD_LIMITS = { company: 200, title: 200, location: 200, link: 2048, details: 5000 };
+
+// ─── Database ────────────────────────────────────────────────────────────────
 let db;
+let hasTimestamps = false;
+
 try {
   const dbPath = path.join(__dirname, 'internships.db');
   db = new Database(dbPath);
-  db.pragma('journal_mode = WAL'); // Better performance for concurrent reads/writes
+  db.pragma('journal_mode = WAL');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS applications (
@@ -28,27 +97,17 @@ try {
       details TEXT
     )
   `);
+
+  const schema = db.prepare('PRAGMA table_info(applications)').all();
+  const cols   = new Set(schema.map((c) => c.name));
+  hasTimestamps = cols.has('created_at') && cols.has('updated_at');
+  console.log(`Timestamp columns: ${hasTimestamps ? 'enabled' : 'disabled (run: node migrate.js)'}`);
 } catch (err) {
   console.error('Failed to initialize database:', err);
   process.exit(1);
 }
 
-const VALID_STATUSES = ['applied', 'assessment', 'interview', 'offer', 'refused', 'ghosted'];
-const LEGACY_STATUS_MAP = {
-  Applied: 'applied',
-  Assessment: 'assessment',
-  Interview: 'interview',
-  Offer: 'offer',
-  Refused: 'refused',
-  Ghosted: 'ghosted',
-  'Offer 🎉': 'offer',
-  'Refused ❌': 'refused',
-  'Ghosted 👻': 'ghosted',
-  'Offer ðŸŽ‰': 'offer',
-  'Refused âŒ': 'refused',
-  'Ghosted ðŸ‘»': 'ghosted',
-};
-
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 function normalizeStatus(input) {
   if (input === null || input === undefined) return null;
   const value = String(input).trim();
@@ -56,18 +115,53 @@ function normalizeStatus(input) {
   return LEGACY_STATUS_MAP[value] || null;
 }
 
-// API Endpoints
+function errorResponse(res, status, message, err = null) {
+  const body = { error: message };
+  if (IS_DEV && err) body.details = err.message;
+  return res.status(status).json(body);
+}
+
+function validateId(req, res, next) {
+  const appId = parseInt(req.params.id, 10);
+  if (Number.isNaN(appId)) return res.status(400).json({ error: 'Invalid ID format' });
+  req.appId = appId;
+  next();
+}
+
+function validateFieldLengths(body, res) {
+  for (const [field, limit] of Object.entries(FIELD_LIMITS)) {
+    const value = body[field];
+    if (value && String(value).length > limit) {
+      res.status(400).json({ error: `Field "${field}" exceeds maximum length of ${limit} characters` });
+      return false;
+    }
+  }
+  return true;
+}
+
+// ─── Endpoints ───────────────────────────────────────────────────────────────
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamps: hasTimestamps });
+});
+
+// Single source of truth for status metadata consumed by the frontend
+app.get('/api/statuses', (req, res) => {
+  res.json(STATUS_CONFIG);
+});
+
 app.get('/api/applications', (req, res) => {
   try {
-    const stmt = db.prepare('SELECT * FROM applications ORDER BY date_applied DESC, id DESC');
-    const rows = stmt.all().map((row) => ({
-      ...row,
-      status: normalizeStatus(row.status) || 'applied',
-    }));
+    const rows = db.prepare('SELECT * FROM applications ORDER BY date_applied DESC, id DESC').all()
+      .map((row) => {
+        const normalized = normalizeStatus(row.status);
+        if (!normalized) console.warn(`Unknown status in DB for id=${row.id}: "${row.status}", defaulting to 'applied'`);
+        return { ...row, status: normalized || 'applied' };
+      });
     res.json(rows);
   } catch (error) {
     console.error('Fetch applications error:', error);
-    res.status(500).json({ error: 'Failed to fetch applications', details: error.message });
+    errorResponse(res, 500, 'Failed to fetch applications', error);
   }
 });
 
@@ -78,102 +172,151 @@ app.post('/api/applications', (req, res) => {
     if (!company?.trim() || !title?.trim()) {
       return res.status(400).json({ error: 'Company and Title are required' });
     }
+    if (!validateFieldLengths(req.body, res)) return;
 
     const safeStatus = normalizeStatus(status) || 'applied';
+    const now        = new Date().toISOString();
 
-    const stmt = db.prepare(`
-      INSERT INTO applications (company, title, location, link, date_applied, status, details)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-    const info = stmt.run(
-      company.trim(),
-      title.trim(),
-      location?.trim() || null,
-      link?.trim() || null,
-      date_applied,
-      safeStatus,
-      details?.trim() || null
-    );
+    const columns  = ['company', 'title', 'location', 'link', 'date_applied', 'status', 'details'];
+    const values   = [company.trim(), title.trim(), location?.trim() || null, link?.trim() || null, date_applied, safeStatus, details?.trim() || null];
+
+    if (hasTimestamps) { columns.push('created_at', 'updated_at'); values.push(now, now); }
+
+    const stmt = db.prepare(`INSERT INTO applications (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`);
+    const info = stmt.run(...values);
     res.status(201).json({ id: info.lastInsertRowid });
   } catch (error) {
     console.error('Add application error:', error);
-    res.status(500).json({ error: 'Failed to add application', details: error.message });
+    errorResponse(res, 500, 'Failed to add application', error);
   }
 });
 
-app.patch('/api/applications/:id', (req, res) => {
+app.patch('/api/applications/:id', validateId, (req, res) => {
   try {
-    const appId = parseInt(req.params.id, 10);
-    if (Number.isNaN(appId)) {
-      return res.status(400).json({ error: 'Invalid ID format' });
-    }
-
     const { status, details } = req.body;
-    const updates = [];
-    const params = [];
+    const updates = [], params = [];
 
     if (status !== undefined) {
       const normalized = normalizeStatus(status);
-      if (!normalized) {
-        return res.status(400).json({ error: 'Invalid status type provided' });
-      }
-      updates.push('status = ?');
-      params.push(normalized);
+      if (!normalized) return res.status(400).json({ error: 'Invalid status type provided' });
+      updates.push('status = ?'); params.push(normalized);
     }
     if (details !== undefined) {
-      updates.push('details = ?');
-      params.push(details === null ? null : String(details).trim());
+      if (details !== null && String(details).length > FIELD_LIMITS.details) {
+        return res.status(400).json({ error: `Field "details" exceeds maximum length of ${FIELD_LIMITS.details} characters` });
+      }
+      updates.push('details = ?'); params.push(details === null ? null : String(details).trim());
     }
 
-    if (updates.length === 0) return res.json({ success: true, message: 'No changes provided' });
+    if (updates.length === 0) return res.status(400).json({ error: 'No valid fields provided for update' });
 
-    params.push(appId);
-    const stmt = db.prepare(`UPDATE applications SET ${updates.join(', ')} WHERE id = ?`);
-    const result = stmt.run(...params);
+    if (hasTimestamps) { updates.push('updated_at = ?'); params.push(new Date().toISOString()); }
 
-    if (result.changes === 0) {
-      return res.status(404).json({ error: 'Application not found' });
-    }
+    params.push(req.appId);
+    const result = db.prepare(`UPDATE applications SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    if (result.changes === 0) return res.status(404).json({ error: 'Application not found' });
 
     res.json({ success: true });
   } catch (error) {
     console.error('Update application error:', error);
-    res.status(500).json({ error: 'Failed to update application', details: error.message });
+    errorResponse(res, 500, 'Failed to update application', error);
   }
 });
 
-app.delete('/api/applications/:id', (req, res) => {
+app.delete('/api/applications/:id', validateId, (req, res) => {
   try {
-    const appId = parseInt(req.params.id, 10);
-    if (Number.isNaN(appId)) {
-      return res.status(400).json({ error: 'Invalid ID format' });
-    }
-
-    const stmt = db.prepare('DELETE FROM applications WHERE id = ?');
-    const result = stmt.run(appId);
-
-    if (result.changes === 0) {
-      return res.status(404).json({ error: 'Application not found' });
-    }
-
+    const result = db.prepare('DELETE FROM applications WHERE id = ?').run(req.appId);
+    if (result.changes === 0) return res.status(404).json({ error: 'Application not found' });
     res.json({ success: true });
   } catch (error) {
     console.error('Delete application error:', error);
-    res.status(500).json({ error: 'Failed to delete application', details: error.message });
+    errorResponse(res, 500, 'Failed to delete application', error);
   }
 });
 
-// PM2 Graceful Shutdown
+// ─── Import endpoint ──────────────────────────────────────────────────────────
+// Accepts an array of application objects (parsed CSV or JSON, ID field ignored).
+// Returns { imported, skipped, errors[] }.
+app.post('/api/import', importLimiter, (req, res) => {
+  const rows = req.body;
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ error: 'Expected a non-empty array of application objects' });
+  }
+  if (rows.length > 1000) {
+    return res.status(400).json({ error: 'Maximum 1000 rows per import' });
+  }
+
+  const now      = new Date().toISOString();
+  const imported = [];
+  const errors   = [];
+
+  const columns  = ['company', 'title', 'location', 'link', 'date_applied', 'status', 'details'];
+  if (hasTimestamps) columns.push('created_at', 'updated_at');
+  const stmt = db.prepare(`INSERT INTO applications (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`);
+
+  const importAll = db.transaction((items) => {
+    for (const [i, row] of items.entries()) {
+      const company = String(row.company || '').trim();
+      const title   = String(row.title   || '').trim();
+
+      if (!company || !title) {
+        errors.push({ row: i + 1, reason: 'Missing company or title' });
+        continue;
+      }
+
+      // Field length check
+      let tooLong = false;
+      for (const [field, limit] of Object.entries(FIELD_LIMITS)) {
+        if (row[field] && String(row[field]).length > limit) {
+          errors.push({ row: i + 1, reason: `Field "${field}" exceeds ${limit} characters` });
+          tooLong = true;
+          break;
+        }
+      }
+      if (tooLong) continue;
+
+      const safeStatus = normalizeStatus(row.status) || 'applied';
+      const values = [
+        company,
+        title,
+        String(row.location || '').trim() || null,
+        String(row.link     || '').trim() || null,
+        row.date_applied || null,
+        safeStatus,
+        String(row.details  || '').trim() || null,
+      ];
+      if (hasTimestamps) values.push(row.created_at || now, now);
+
+      stmt.run(...values);
+      imported.push(i + 1);
+    }
+  });
+
+  try {
+    importAll(rows);
+  } catch (error) {
+    console.error('Import error:', error);
+    return errorResponse(res, 500, 'Import failed — no rows were written', error);
+  }
+
+  res.json({
+    imported: imported.length,
+    skipped:  errors.length,
+    errors,
+  });
+});
+
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
 const shutdown = () => {
-  console.log('Closing database connection...');
+  console.log('Closing database connection…');
   if (db) db.close();
   process.exit(0);
 };
-
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-// Start Server
+// ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log('Server running on http://localhost:' + PORT);
+  console.log(`Server running on http://localhost:${PORT} [${IS_DEV ? 'development' : 'production'}]`);
 });
