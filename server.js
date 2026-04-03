@@ -60,9 +60,9 @@ const STATUS_CONFIG = [
   { key: 'applied',    label: 'Applied',      chartColor: '#3b82f6', css: 'bg-blue-100 text-blue-800' },
   { key: 'assessment', label: 'Assessment',   chartColor: '#f59e0b', css: 'bg-yellow-100 text-yellow-800' },
   { key: 'interview',  label: 'Interview',    chartColor: '#a855f7', css: 'bg-purple-100 text-purple-800' },
-  { key: 'offer',      label: 'Offer 🎉',     chartColor: '#22c55e', css: 'bg-green-100 text-green-800' },
-  { key: 'refused',    label: 'Refused ❌',   chartColor: '#ef4444', css: 'bg-red-100 text-red-800' },
-  { key: 'ghosted',    label: 'Ghosted 👻',   chartColor: '#9ca3af', css: 'bg-gray-200 text-gray-800' },
+  { key: 'offer',      label: 'Offer \u{1F389}',   chartColor: '#22c55e', css: 'bg-green-100 text-green-800' },
+  { key: 'refused',    label: 'Refused \u{274C}',  chartColor: '#ef4444', css: 'bg-red-100 text-red-800' },
+  { key: 'ghosted',    label: 'Ghosted \u{1F47B}', chartColor: '#9ca3af', css: 'bg-gray-200 text-gray-800' },
 ];
 
 const VALID_STATUSES = STATUS_CONFIG.map((s) => s.key);
@@ -70,8 +70,9 @@ const VALID_STATUSES = STATUS_CONFIG.map((s) => s.key);
 const LEGACY_STATUS_MAP = {
   Applied: 'applied', Assessment: 'assessment', Interview: 'interview',
   Offer: 'offer', Refused: 'refused', Ghosted: 'ghosted',
-  'Offer 🎉': 'offer',   'Refused ❌': 'refused',   'Ghosted 👻': 'ghosted',
-  'Offer ðŸŽ‰': 'offer', 'Refused âŒ': 'refused', 'Ghosted ðŸ'»': 'ghosted',
+  ['Offer \u{1F389}']: 'offer', ['Refused \u{274C}']: 'refused', ['Ghosted \u{1F47B}']: 'ghosted',
+  // garbled UTF-8 variants from older data
+  ['Offer \uFFFD\uFFFD\uFFFD']: 'offer', ['Refused \uFFFD\uFFFD']: 'refused', ['Ghosted \uFFFD\uFFFD\uFFFD']: 'ghosted',
 };
 
 const FIELD_LIMITS = { company: 200, title: 200, location: 200, link: 2048, details: 5000 };
