@@ -108,7 +108,7 @@ const editingDetailsIds = new Set();
 // ─── Chart plugin ─────────────────────────────────────────────────────────────
 const centerTextPlugin = {
     id: 'centerText',
-    afterDraw(chart, args, pluginOptions) {
+    afterDatasetsDraw(chart, args, pluginOptions) {
         const { ctx, chartArea } = chart;
         if (!chartArea) return;
         const centerX    = (chartArea.left + chartArea.right) / 2;
