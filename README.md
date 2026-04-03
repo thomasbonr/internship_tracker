@@ -3,6 +3,8 @@
 A self-hosted, single-user web app to track job/internship applications.  
 Stack: **Node.js + Express + SQLite** (backend) · **HTML + Tailwind + Chart.js** (frontend, no build step).
 
+<img width="2432" height="1385" alt="image" src="https://github.com/user-attachments/assets/3cdc8817-9a2d-4ca7-835c-c5856e28d517" />
+
 ---
 
 ## Features
