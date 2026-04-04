@@ -4,3 +4,6 @@
 *.db-wal
 *.db-journal
 backups/
+node_modules/
+dist/
+build/ 
