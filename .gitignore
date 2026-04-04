@@ -1,1 +1,6 @@
 .claude/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+backups/
