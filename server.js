@@ -6,11 +6,12 @@ const path      = require('path');
 
 const app    = express();
 const PORT   = process.env.PORT || 3000;
+const HOST   = process.env.HOST || '127.0.0.1'; // only reachable through nginx/Caddy
 const IS_DEV = process.env.NODE_ENV !== 'production';
 
-// Trust the first proxy hop (Nginx). Required for express-rate-limit to read
-// the real client IP from X-Forwarded-For without throwing a validation error.
-app.set('trust proxy', 1);
+// Trust two proxy hops (Caddy -> Nginx) so req.ip is the real client IP
+// (needed by express-rate-limit to rate-limit per client, not per proxy).
+app.set('trust proxy', 2);
 
 // ─── Security headers ────────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -358,6 +359,6 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 // ─── Start ────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT} [${IS_DEV ? 'development' : 'production'}]`);
+app.listen(PORT, HOST, () => {
+  console.log(`Server running on http://${HOST}:${PORT} [${IS_DEV ? 'development' : 'production'}]`);
 });
