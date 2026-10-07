@@ -129,10 +129,17 @@ function errorResponse(res, status, message, err = null) {
 }
 
 function validateId(req, res, next) {
+  if (!/^\d+$/.test(req.params.id)) return res.status(400).json({ error: 'Invalid ID format' });
   const appId = parseInt(req.params.id, 10);
   if (Number.isNaN(appId)) return res.status(400).json({ error: 'Invalid ID format' });
   req.appId = appId;
   next();
+}
+
+function isValidDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
 }
 
 function validateFieldLengths(body, res) {
@@ -180,12 +187,15 @@ app.post('/api/applications', (req, res) => {
       return res.status(400).json({ error: 'Company and Title are required' });
     }
     if (!validateFieldLengths(req.body, res)) return;
+    if (date_applied && !isValidDate(date_applied)) {
+      return res.status(400).json({ error: 'date_applied must be a valid YYYY-MM-DD date' });
+    }
 
     const safeStatus = normalizeStatus(status) || 'applied';
     const now        = new Date().toISOString();
 
     const columns  = ['company', 'title', 'location', 'link', 'date_applied', 'status', 'details'];
-    const values   = [company.trim(), title.trim(), location?.trim() || null, link?.trim() || null, date_applied, safeStatus, details?.trim() || null];
+    const values   = [company.trim(), title.trim(), location?.trim() || null, link?.trim() || null, date_applied || null, safeStatus, details?.trim() || null];
 
     if (hasTimestamps) { columns.push('created_at', 'updated_at'); values.push(now, now); }
 
@@ -202,6 +212,25 @@ app.patch('/api/applications/:id', validateId, (req, res) => {
   try {
     const { status, details } = req.body;
     const updates = [], params = [];
+
+    for (const field of ['company', 'title']) {
+      if (req.body[field] === undefined) continue;
+      const v = String(req.body[field] ?? '').trim();
+      if (!v) return res.status(400).json({ error: `${field} cannot be empty` });
+      if (v.length > FIELD_LIMITS[field]) return res.status(400).json({ error: `Field "${field}" exceeds maximum length of ${FIELD_LIMITS[field]} characters` });
+      updates.push(`${field} = ?`); params.push(v);
+    }
+    for (const field of ['location', 'link']) {
+      if (req.body[field] === undefined) continue;
+      const v = String(req.body[field] ?? '').trim();
+      if (v.length > FIELD_LIMITS[field]) return res.status(400).json({ error: `Field "${field}" exceeds maximum length of ${FIELD_LIMITS[field]} characters` });
+      updates.push(`${field} = ?`); params.push(v || null);
+    }
+    if (req.body.date_applied !== undefined) {
+      const v = req.body.date_applied;
+      if (v !== null && v !== '' && !isValidDate(v)) return res.status(400).json({ error: 'date_applied must be a valid YYYY-MM-DD date' });
+      updates.push('date_applied = ?'); params.push(v || null);
+    }
 
     if (status !== undefined) {
       const normalized = normalizeStatus(status);
@@ -282,6 +311,11 @@ app.post('/api/import', importLimiter, (req, res) => {
         }
       }
       if (tooLong) continue;
+
+      if (row.date_applied && !isValidDate(row.date_applied)) {
+        errors.push({ row: i + 1, reason: 'date_applied must be YYYY-MM-DD' });
+        continue;
+      }
 
       const safeStatus = normalizeStatus(row.status) || 'applied';
       const values = [

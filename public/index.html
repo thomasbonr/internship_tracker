@@ -3,20 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Internship Tracker</title>
-    <!--
-      Tailwind Play CDN: generates CSS dynamically from DOM — SRI is not compatible
-      with this CDN by design. For production hardening, replace with a compiled
-      Tailwind CSS file built via `npx tailwindcss -o public/tailwind.css --minify`
-      and a <link> tag with an integrity attribute.
-    -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Job Tracker</title>
+    <!-- Tailwind compiled locally (see README: rebuilding CSS) -->
+    <link rel="stylesheet" href="/tailwind.css">
     <!-- Chart.js served locally from node_modules (no external CDN dependency) -->
     <script src="/js/chart.min.js"></script>
 </head>
 <body class="p-8 max-w-7xl mx-auto">
 
-<h1 class="text-3xl font-bold mb-8 text-indigo-600">&#x1F680; Internship Tracker</h1>
+<h1 class="text-3xl font-bold mb-8 text-indigo-600">&#x1F680; Job Tracker</h1>
 
 <!-- Overview -->
 <div class="bg-white p-6 rounded-lg shadow-md mb-8">
@@ -233,6 +228,15 @@ function getVisibleApplications() {
     });
 }
 
+const FOLLOW_UP_DAYS = 14;
+function needsFollowUp(app, statusKey) {
+    if (statusKey !== 'applied' || !app.date_applied) return false;
+    const ageDays = (Date.now() - new Date(app.date_applied + 'T00:00:00').getTime()) / 86400000;
+    return ageDays >= FOLLOW_UP_DAYS;
+}
+
+const INPUT_CLS = 'w-full border p-1 rounded text-sm focus:ring focus:ring-indigo-200 outline-none';
+
 // ─── Table rendering ──────────────────────────────────────────────────────────
 function renderTable(data) {
     const tbody = document.getElementById('tableBody');
@@ -251,13 +255,19 @@ function renderTable(data) {
         const statusData   = STATUS_MAP[statusKey];
         const isEditing    = editingDetailsIds.has(app.id);
         const detailsValue = app.details || '';
+        const followUp     = needsFollowUp(app, statusKey);
+        const ed           = (field, type = 'text', max = 200) =>
+            `<input type="${type}" id="edit-${field}-${app.id}" value="${escapeHTML(app[field] || '')}" maxlength="${max}" class="${INPUT_CLS}">`;
 
         tr.innerHTML = `
-            <td class="p-4 whitespace-nowrap text-sm text-gray-600">${escapeHTML(app.date_applied || '-')}</td>
-            <td class="p-4 font-semibold">${escapeHTML(app.company)}</td>
+            <td class="p-4 whitespace-nowrap text-sm text-gray-600">${isEditing ? ed('date_applied', 'date', 10) : escapeHTML(app.date_applied || '-')}
+                ${!isEditing && followUp ? '<div class="text-xs text-orange-600 font-medium" title="No answer for ' + FOLLOW_UP_DAYS + '+ days">&#x23F0; Follow up</div>' : ''}</td>
+            <td class="p-4 font-semibold">${isEditing ? ed('company') : escapeHTML(app.company)}</td>
             <td class="p-4">
-                <div class="text-sm text-gray-900">${escapeHTML(app.title)}</div>
-                <div class="text-xs text-gray-500">${escapeHTML(app.location)}</div>
+                ${isEditing
+                    ? `<div class="space-y-1">${ed('title')}${ed('location')}</div>`
+                    : `<div class="text-sm text-gray-900">${escapeHTML(app.title)}</div>
+                <div class="text-xs text-gray-500">${escapeHTML(app.location)}</div>`}
                 <div id="details-${app.id}" class="mt-1">
                     ${isEditing
                         ? `<textarea id="details-input-${app.id}" class="w-full border p-2 rounded text-xs focus:ring focus:ring-indigo-200 outline-none h-20">${escapeHTML(detailsValue)}</textarea>`
@@ -267,7 +277,7 @@ function renderTable(data) {
                 </div>
             </td>
             <td class="p-4">
-                ${normalizedLink ? `<a href="${escapeHTML(normalizedLink)}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline text-sm">View Job</a>` : '-'}
+                ${isEditing ? ed('link', 'url', 2048) : normalizedLink ? `<a href="${escapeHTML(normalizedLink)}" target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:underline text-sm">View Job</a>` : '-'}
             </td>
             <td class="p-4">
                 <select data-prev-value="${statusKey}" onchange="updateStatus(${app.id}, this.value, this)"
@@ -303,13 +313,15 @@ function renderStats(data) {
     const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 30);
     const last30 = data.filter((app) => app.date_applied && app.date_applied >= cutoff.toISOString().slice(0, 10)).length;
 
+    const followUps = data.filter((app) => needsFollowUp(app, normalizeStatusClient(app.status))).length;
+
     const cards = [
         { label: 'Response rate',   value: total ? `${responseRate}%` : '—', sub: total ? `${responded} of ${total} replied` : 'no applications yet', color: 'text-indigo-600' },
         { label: 'Offer rate',      value: total ? `${offerRate}%`    : '—', sub: `${counts.offer || 0} offer${(counts.offer || 0) !== 1 ? 's' : ''} received`,   color: 'text-green-600' },
         { label: 'Ghosted',         value: total ? `${ghostedRate}%`  : '—', sub: `${counts.ghosted || 0} ghosted`,       color: 'text-gray-500' },
         { label: 'Active pipeline', value: String(active),                    sub: 'applied · assessment · interview',     color: 'text-purple-600' },
+        { label: 'To follow up',    value: String(followUps),                 sub: `applied ${FOLLOW_UP_DAYS}+ days ago, no reply`, color: 'text-orange-500' },
         { label: 'Last 30 days',    value: String(last30),                    sub: 'applications sent',                    color: 'text-orange-500' },
-        { label: 'Total',           value: String(total),                     sub: 'all time',                             color: 'text-gray-700' },
     ];
 
     document.getElementById('statsCards').innerHTML = cards.map(({ label, value, sub, color }) => `
@@ -438,13 +450,19 @@ function cancelEditDetails(id) { editingDetailsIds.delete(id); renderTable(getVi
 
 async function saveDetails(id, buttonEl) {
     const input = document.getElementById(`details-input-${id}`);
+    const val   = (f) => document.getElementById(`edit-${f}-${id}`)?.value ?? '';
+    if (!val('company').trim() || !val('title').trim()) { alert('Company and Title are required.'); return; }
     const orig  = buttonEl.innerText;
     buttonEl.innerText = 'Saving…'; buttonEl.disabled = true;
     try {
         const res = await fetch(`/api/applications/${id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ details: input ? input.value : '' }),
+            body: JSON.stringify({
+                company: val('company'), title: val('title'), location: val('location'),
+                link: val('link'), date_applied: val('date_applied'),
+                details: input ? input.value : '',
+            }),
         });
         if (!res.ok) throw await parseErrorResponse(res);
         editingDetailsIds.delete(id);
@@ -472,14 +490,14 @@ async function deleteApp(id) {
 // ─── Export ───────────────────────────────────────────────────────────────────
 function exportJSON() {
     if (!allApplications.length) { alert('No data to export.'); return; }
-    downloadFile(JSON.stringify(allApplications, null, 2), `internships_${isoDateStamp()}.json`, 'application/json');
+    downloadFile(JSON.stringify(allApplications, null, 2), `applications_${isoDateStamp()}.json`, 'application/json');
 }
 
 function exportCSV() {
     if (!allApplications.length) { alert('No data to export.'); return; }
     const headers = ['id', 'date_applied', 'company', 'title', 'location', 'link', 'status', 'details'];
     const csv     = [headers.join(','), ...allApplications.map((app) => headers.map((h) => csvCell(app[h] ?? '')).join(','))].join('\r\n');
-    downloadFile(csv, `internships_${isoDateStamp()}.csv`, 'text/csv;charset=utf-8;');
+    downloadFile(csv, `applications_${isoDateStamp()}.csv`, 'text/csv;charset=utf-8;');
 }
 
 // ─── CSV parser (state machine, handles quoted fields with newlines/commas) ───

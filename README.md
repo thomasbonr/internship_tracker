@@ -1,4 +1,4 @@
-# Internship Tracker
+# Job Tracker
 
 A self-hosted, single-user web app to track job/internship applications.  
 Stack: **Node.js + Express + SQLite** (backend) · **HTML + Tailwind + Chart.js** (frontend, no build step).
@@ -291,4 +291,19 @@ npm install                     # in case dependencies changed
 node migrate.js --dry-run       # check what would change
 node migrate.js                 # apply if needed
 pm2 restart internship-tracker
+```
+
+---
+
+## Rebuilding the CSS (Tailwind)
+
+The UI uses a precompiled `public/tailwind.css` (no CDN, works offline). After changing
+classes in `public/index.html` or the `css` fields in `server.js`, rebuild it on a machine
+with npm (Tailwind v3):
+
+```bash
+npm i -D tailwindcss@3.4.17
+echo "module.exports={content:[\"./public/index.html\",\"./server.js\"]}" > tailwind.config.js
+printf "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n" > in.css
+npx tailwindcss -c tailwind.config.js -i in.css -o public/tailwind.css --minify
 ```
